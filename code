@@ -1,0 +1,19 @@
+trainset <- fromJSON(file.choose()) #load train data from json 
+
+####create separate data frame for features#####
+trainset_features <- data.table(listing_id=rep(unlist(trainset$listing_id), lapply(trainset$features, length)), features=unlist(trainset$features))
+####create separate data frame for photos####
+trainset_photos <- data.table(listing_id=rep(unlist(trainset$listing_id), lapply(trainset$photos, length)), photos=unlist(trainset$photos))
+#merge
+vars <- setdiff(names(trainset), c("photos", "features"))
+trainset<- map_at(trainset, vars, unlist) %>% as.data.table(.)
+trainset[,":="(filter=0)]
+
+#photo counts
+photo_count <- trainset_photos[,.(photo_count=.N), by=listing_id]
+trainset <- merge(trainset, photo_count, by="listing_id", all.x=TRUE, sort=FALSE)
+rm(trainset_photos, photo_count);gc()
+#feature count
+feature_count <- trainset_features[,. (feature_count=.N), by=listing_id]
+trainset <- merge(trainset, feature_count, by ="listing_id", all.x=TRUE, sort=FALSE)
+rm(trainset_features, feature_count);gc()
