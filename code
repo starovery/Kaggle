@@ -1,19 +1,315 @@
-trainset <- fromJSON(file.choose()) #load train data from json 
+library("purrr")
+library("data.table")
+library("xgboost")
+library("caret") #
+library("stringr")
+library("quanteda") #
+library("lubridate")
+library("stringr")
+library("Hmisc")
+library("Matrix")
+library("tm")
+library("dtplyr")
+library("rjson")
+library("nnet")
+library("ggmap")
+library("wordcloud")
+
+##################################################################
+##################################################################
+##########DATA EXPLORATION########################################
+##################################################################
+##################################################################
+
+trainset <- fromJSON(file = file.choose()) #load train data from json 
 
 ####create separate data frame for features#####
 trainset_features <- data.table(listing_id=rep(unlist(trainset$listing_id), lapply(trainset$features, length)), features=unlist(trainset$features))
 ####create separate data frame for photos####
 trainset_photos <- data.table(listing_id=rep(unlist(trainset$listing_id), lapply(trainset$photos, length)), photos=unlist(trainset$photos))
-#merge
+
+#link these dataframes to the original
 vars <- setdiff(names(trainset), c("photos", "features"))
 trainset<- map_at(trainset, vars, unlist) %>% as.data.table(.)
 trainset[,":="(filter=0)]
+
+#clean the data, convert to the right format
+trainset$created <- as.Date(trainset$created)
+trainset$bathrooms <- as.numeric(trainset$bathrooms)
+trainset$bedrooms <- as.numeric(trainset$bedrooms)
+trainset$price <- as.numeric(trainset$price)
+trainset$longitude <- as.numeric(trainset$longitude)
+trainset$latitude <- as.numeric(trainset$latitude)
+trainset$building_id <- as.character(trainset$building_id)
+trainset$manager_id <- as.character(trainset$manager_id)
+train.df$interest_level <- as.factor(unlist(train.df$interest_level))
+train.df$interest_level <- factor(train.df$interest_level, levels = c("high", "medium", "low"))
 
 #photo counts
 photo_count <- trainset_photos[,.(photo_count=.N), by=listing_id]
 trainset <- merge(trainset, photo_count, by="listing_id", all.x=TRUE, sort=FALSE)
 rm(trainset_photos, photo_count);gc()
+trainset$photo_count[is.na(trainset$photo_count)] <- 0 #get rid of NAs
+
 #feature count
 feature_count <- trainset_features[,. (feature_count=.N), by=listing_id]
 trainset <- merge(trainset, feature_count, by ="listing_id", all.x=TRUE, sort=FALSE)
 rm(trainset_features, feature_count);gc()
+trainset$feature_count[is.na(trainset$feature_count)] <- 0 #get rid of NAs
+
+##########################################################################
+#################EXPLORING THE DATA#######################################
+##########################################################################
+
+#separate the data by interest
+low <- trainset[trainset$interest_level == "low"]
+medium <- trainset[trainset$interest_level == "medium"]
+high <- trainset[trainset$interest_level == "high"]
+
+####how does a number of pics affect interest?#####
+photo_count.low <- low %>% 
+  group_by(photo_count) %>%
+  summarise(no_rows = length(photo_count))
+photo_count.medium <- medium %>% 
+  group_by(photo_count) %>%
+  summarise(no_rows = length(photo_count))
+photo_count.high <- high %>% 
+  group_by(photo_count) %>%
+  summarise(no_rows = length(photo_count))
+
+#Low interest:
+barplot(photo_count.low$no_rows[1:21]/nrow(low), names.arg = photo_count.low$photo_count[1:21], ylim = c(0,0.2))
+#Medium:
+barplot(photo_count.medium$no_rows[1:21]/nrow(medium), names.arg = photo_count.medium$photo_count[1:21], ylim = c(0,0.2))
+#High
+barplot(photo_count.high$no_rows[1:21]/nrow(high), names.arg = photo_count.high$photo_count[1:21], ylim = c(0,0.2))
+#Conclusion
+#Medium and High have an approx normal distribution while Low has a clear outlier w 0 photos
+#=> 0 photos - low interest
+
+####how does a number of bedrooms affect interest?#####
+bedrooms.low <- low %>% 
+  group_by(bedrooms) %>%
+  summarise(no_rows = length(bedrooms))
+bedrooms.medium <- medium %>% 
+  group_by(bedrooms) %>%
+  summarise(no_rows = length(bedrooms))
+bedrooms.high <- high %>% 
+  group_by(bedrooms) %>%
+  summarise(no_rows = length(bedrooms))
+
+#Low interest:
+barplot(bedrooms.low$no_rows[1:9]/nrow(low), names.arg = bedrooms.low$bedrooms[1:9], ylim = c(0,0.5))
+#Medium:
+barplot(bedrooms.medium$no_rows[1:8]/nrow(medium), names.arg = bedrooms.medium$bedrooms[1:8], ylim = c(0,0.5))
+#High
+barplot(bedrooms.high$no_rows[1:6]/nrow(high), names.arg = bedrooms.high$bedrooms[1:6], ylim = c(0,0.5))
+#number of bedrooms doesn't have a huge effect however 2 bedrooms seem to be the most popular
+
+#####features###########
+#grouping the feature variable vectors into a corpus 
+
+#####Low interest exploration#############
+Corpus.low <- Corpus(VectorSource(low$features))
+Corpus.low <- tm_map(Corpus.low, content_transformer(tolower))#\to lower case
+Corpus.low <- tm_map(Corpus.low, removeNumbers)# Remove numbers
+Corpus.low <- tm_map(Corpus.low, removeWords, stopwords("english"))# Remove english common
+Corpus.low <- tm_map(Corpus.low, removePunctuation)# Remove punctuations
+Corpus.low <- tm_map(Corpus.low, stripWhitespace) #Remove spaces
+termmatrix.low <- TermDocumentMatrix(Corpus.low)# term matrix
+matrix.low <- as.matrix(termmatrix.low)
+v.low <- sort(rowSums(matrix.low),decreasing=TRUE)
+d.low <- data.frame(word = names(v.low),freq=v.low)# data frame with word
+
+
+######Medium interest exploration#################
+Corpus.medium <- Corpus(VectorSource(medium$features))
+Corpus.medium <- tm_map(Corpus.medium, content_transformer(tolower))
+Corpus.medium <- tm_map(Corpus.medium, removeNumbers)
+Corpus.medium <- tm_map(Corpus.medium, removeWords, stopwords("english"))
+Corpus.medium <- tm_map(Corpus.medium, removePunctuation)
+Corpus.medium <- tm_map(Corpus.medium, stripWhitespace)
+termmatrix.medium <- TermDocumentMatrix(Corpus.medium)
+matrix.medium <- as.matrix(termmatrix.medium)
+v.medium <- sort(rowSums(matrix.medium),decreasing=TRUE)
+d.medium <- data.frame(word = names(v.medium),freq=v.medium)
+
+#####High exploration###########################
+Corpus.high <- Corpus(VectorSource(high$features))
+Corpus.high <- tm_map(Corpus.high, content_transformer(tolower))
+Corpus.high <- tm_map(Corpus.high, removeNumbers)
+Corpus.high <- tm_map(Corpus.high, removeWords, stopwords("english"))
+Corpus.high <- tm_map(Corpus.high, removePunctuation)
+Corpus.high <- tm_map(Corpus.high, stripWhitespace)
+termmatrix.high <- TermDocumentMatrix(Corpus.high)
+matrix.high <- as.matrix(termmatrix.high)
+v.high <- sort(rowSums(matrix.high),decreasing=TRUE)
+d.high <- data.frame(word = names(v.high),freq=v.high)
+
+#plotting most frecuent words per interest level together
+set.seed(222)
+
+par(mfrow = c(2, 3))
+barplot(d.low[1:10,]$freq, las = 2, names.arg = d.low[1:10,]$word,col ="lightblue", main ="Most frequent words Low interest", ylab = "Word frequencies")
+barplot(d.medium[1:10,]$freq, las = 2, names.arg = d.medium[1:10,]$word,col ="lightblue", main ="Most frequent words Medium interest", ylab = "Word frequencies")
+barplot(d.high[1:10,]$freq, las = 2, names.arg = d.high[1:10,]$word,col ="lightblue", main ="Most frequent words High interest", ylab = "Word frequencies")
+
+wordcloud(words = d.low$word, freq = d.low$freq, min.freq = 1, max.words=150, random.order=FALSE, rot.per=0.35, colors=brewer.pal(6, "Dark2"))
+wordcloud(words = d.medium$word, freq = d.medium$freq, min.freq = 1, max.words=150, random.order=FALSE, rot.per=0.35, colors=brewer.pal(6, "Dark2"))
+wordcloud(words = d.high$word, freq = d.high$freq, min.freq = 1, max.words=150, random.order=FALSE, rot.per=0.35, colors=brewer.pal(6, "Dark2"))
+#conclusion - features do not affect the interest much
+
+
+#####################################################################
+###########geographical mining#######################################
+#####################################################################
+
+NY <- geocode("new york", source = "google") # the centre of NY
+
+#calculate the distance from city centre using Pythogorian
+trainset$HowFar <- mapply(function(lon, lat) sqrt((lon - NY$lon)^2  + (lat - NY$lat)^2), trainset$longitude, trainset$latitude) 
+#plot
+ggplot(trainset[trainset$HowFar < 0.1, ],
+       aes(HowFar, color = interest_level_factor)) +
+  geom_density()
+ggplot(trainset[trainset$HowFar < 0.2, ],
+       aes(HowFar, color = interest_level_factor)) +
+  geom_density()
+ggplot(trainset[trainset$HowFar < 0.3, ],
+       aes(HowFar, color = interest_level_factor)) +
+  geom_density()
+ggplot(trainset[trainset$HowFar < 0.5, ],
+       aes(HowFar, color = interest_level_factor)) +
+  geom_density()
+
+#Notice how the distribution becomes more and more skewed as we widen the radius
+
+####Time of Creation######
+
+#Let's do time series!
+
+#group by the date created and interest level, create a df with counts
+timeseries_df <- trainset %>% group_by(created) %>% count(interest_level_factor)
+timeseries <- ggplot(timeseries_df, aes(created, n))
+timeseries <- timeseries + geom_line(aes(color = interest_level_factor), size = 0.5)
+timeseries <- timeseries + ylab("# of Listings") + theme(legend.position = "bottom")
+timeseries
+######building popularity#############
+countbybuild <- trainset %>% filter(building_id != 0) %>% group_by(building_id, interest_level_factor) %>% 
+  summarise(no_rows = length(interest_level_factor)) %>% 
+  spread(interest_level_factor, no_rows) %>% filter(!is.na(high))
+countbybuild$medium[is.na(countbybuild$medium)] <- 0
+countbybuild$low[is.na(countbybuild$low)] <- 0
+countbybuild <- countbybuild %>% mutate(per = (100 * high / (low + medium + high)))
+countbybuild_popular_sort <- arrange(countbybuild, desc(per))  #buildings sorted by most popular
+countbybuild <- countbybuild %>% mutate(per1 = (100 * low / (low + medium + high)))
+countbybuild_UNpopular_sort <- arrange(countbybuild, desc(per1)) #buildings sorted by most popular
+#interesting observation -  there are buildings that add popularoty but it doesn't seem like
+#there are buildings that substract popularity
+
+############################################################################
+############################################################################
+################REGRESSION METHOD###########################################
+############################################################################
+############################################################################
+
+#do all the necessary operations for the testing data
+test <- fromJSON(file = file.choose()) #load test data from json 
+
+####create separate data frame for features#####
+test_features <- data.table(listing_id=rep(unlist(test$listing_id), lapply(test$features, length)), features=unlist(test$features))
+####create separate data frame for photos####
+test_photos <- data.table(listing_id=rep(unlist(test$listing_id), lapply(test$photos, length)), photos=unlist(test$photos))
+
+#link these dataframes to the original
+vars1 <- setdiff(names(test), c("photos", "features"))
+test<- map_at(test, vars1, unlist) %>% as.data.table(.)
+test[,":="(filter=0)]
+
+#clean the data, convert to the right format
+test$created <- as.Date(test$created)
+test$bathrooms <- as.numeric(test$bathrooms)
+test$bedrooms <- as.numeric(test$bedrooms)
+test$price <- as.numeric(test$price)
+test$longitude <- as.numeric(test$longitude)
+test$latitude <- as.numeric(test$latitude)
+test$building_id <- as.character(test$building_id)
+test$manager_id <- as.character(test$manager_id)
+test$interest_level_factor <- as.factor(test$interest_level)
+test$interest_level_factor <- factor(test$interest_level, levels = c("high", "medium", "low"))
+
+#photo counts
+photo_count <- test_photos[,.(photo_count =.N), by=listing_id]
+test <- merge(test, photo_count, by="listing_id", all.x=TRUE, sort=FALSE)
+rm(test_photos, photo_count);gc()
+test$photo_count[is.na(test$photo_count)] <- 0 #get rid of NAs
+
+#feature count
+feature_count <- test_features[,. (feature_count=.N), by=listing_id]
+test <- merge(test, feature_count, by ="listing_id", all.x=TRUE, sort=FALSE)
+rm(test_features, feature_count);gc()
+test$feature_count[is.na(test$feature_count)] <- 0 #get rid of NAs
+
+
+#Distance from the city centre (HowFar)
+test$HowFar <- mapply(function(lon, lat) sqrt((lon - NY$lon)^2  + (lat - NY$lat)^2), test$longitude, test$latitude) 
+
+######################################
+########regression building###########
+######################################
+#turn interest factors into numerical
+unique(trainset$interest_level)
+interest_factor_2 <- rep(NA, nrow(trainset))
+trainset <- cbind(trainset, interest_factor_2)
+trainset$interest_factor_2[trainset$interest_level == "low"] <- 0
+trainset$interest_factor_2[trainset$interest_level == "medium"] <- 1
+trainset$interest_factor_2[trainset$interest_level == "high"] <- 2
+trainset$interest_factor_2 <- factor(trainset$interest_factor_2)
+
+#Making "low" interest level as reference:
+trainset$interest_factor_mult <- relevel(trainset$interest_factor_2, ref = "0")
+
+#Fitting the Multinomial LR:
+LR <- multinom(interest_factor_mult ~ bathrooms + bedrooms + price + feature_count + HowFar + photo_count , data = trainset )
+
+prediction_training <- predict(LR, trainset)
+
+print(mean(predict(LR) == trainset$interest_factor_2))
+
+#Making predictions on testing data:
+prediction_training <- predict(LR, test)
+
+#Making predictions with probabilities on testing data:
+probabilities_prediction <- predict(LR, test, type = "prob")
+colnames(probabilities_prediction) <- c("Low", "Medium", "High")
+rownames(probabilities_prediction) <- test$listing_id
+
+write.csv(probabilities_prediction, "prediction.csv")
+
+#############################################################################
+#############################################################################
+##################MACHINE LEARNING###########################################
+#############################################################################
+#############################################################################
+
+###############
+######XGB######
+###############
+
+###############
+#####KNN#######
+###############
+
+###########NEXT STEPS!!!!##############
+#Tune regression parameters, introduce building ppopularity (as in data exploration)
+#Cut off HowFar with a certain radius so that it is a more precise estimate (as in data explore)
+#Create several HowFars based on clusters - ggplotting listings on a map of NY definitely shows 
+#severeal clusters for high interest 
+#Create a new parameter - how many apartments are for listing in the same building. Explore. Maybe add to regression
+
+
+#Do XGB
+#Do neural network clustering
+#Cross validate
+#Create a probability prediction based on all 3 methods
+
